@@ -1,0 +1,17 @@
+{
+  "name": "stress-test",
+  "version": "1.0.0",
+  "description": "A stress testing software that opens multiple headless chrome sessions",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js https://www.test.com 5"
+  },
+  "dependencies": {
+    "line-reader": "^0.4.0",
+    "puppeteer": "^20.7.3",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
+  },
+  "author": "",
+  "license": "ISC"
+}
