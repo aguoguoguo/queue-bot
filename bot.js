@@ -1,7 +1,6 @@
 const puppeteer = require('puppeteer-extra');
 const pluginStealth = require('puppeteer-extra-plugin-stealth');
 const cluster = require('cluster');
-const numCPUs = require('os').cpus().length;
 
 puppeteer.use(pluginStealth());
 
@@ -16,87 +15,114 @@ if (process.argv.length < 3) {
 targetUrl = process.argv[2];
 numSessions = parseInt(process.argv[3]);
 
-launchWorkers();
-
-function launchWorkers() {
-  if (cluster.isMaster) {
+if (cluster.isMaster) {
     console.log(`Master ${process.pid} is running`);
 
     for (let i = 0; i < numSessions; i++) {
-      cluster.fork();
+        cluster.fork();
     }
 
     cluster.on('exit', (worker, code, signal) => {
-      console.log(`Worker ${worker.process.pid} died`);
+        console.log(`Worker ${worker.process.pid} died`);
     });
-  } else {
+
+    process.on('SIGINT', () => {
+      console.log("\nGracefully shutting down from SIGINT (CTRL+C)");
+
+      cluster.disconnect(() => {
+          console.log("All workers closed.");
+          process.exit(); // Exit the master process
+      });
+    });
+
+} else {
+    let browser; // Declare the browser inside the worker
+    let checkUrlChangeTimeout; // Define timeout reference
+    
+    let pageClosed = false; // Flag to track if the original page has been closed
+    
     console.log(`Worker ${process.pid} started`);
     runTest(targetUrl);
-  }
-}
+    
+  
+  process.on('SIGINT', async () => {
+    console.log(`\nWorker ${process.pid} gracefully shutting down from SIGINT (CTRL+C)`);
 
-async function runTest(url) {
-  let page;
-  let browser;
+    if (browser) {
+      await browser.close();
+      console.log(`Worker ${process.pid} Browser closed.`);
+    }
+
+    clearTimeout(checkUrlChangeTimeout); // Clear the timeout
+    process.exit(); // Exit the worker process
+  });
 
   async function launchBrowser() {
-    browser = await puppeteer.launch({
-      headless: "new",
-      args: ['--no-sandbox', '--disable-setuid-sandbox']
-    });
+    if (!browser) {
+      browser = await puppeteer.launch({
+        headless: "new",
+        args: ['--no-sandbox', '--disable-setuid-sandbox']
+      });
+    }
+    return browser;
+  }
 
-    page = await browser.newPage();
+  async function runTest(url) {
+    await launchBrowser();
+    const page = await browser.newPage();
 
     // Block images
     await page.setRequestInterception(true);
     page.on('request', (req) => {
       if(req.resourceType() === 'image'){
         req.abort();
-      }
-      else {
+      } else {
         req.continue();
       }
     });
 
-    await page.goto(url);
-    await page.screenshot({ path: 'image.png', fullPage: true });
+    try {
+      await page.goto(url);
+      // await page.screenshot({ path: `image_${process.pid}.png`, fullPage: true });
 
-    let isLaunchingBrowser = false;
+      async function checkUrlChange() {
+        try {
+            if (page.url() !== url && !pageClosed) {
+                console.log(`Worker ${process.pid} has passed queue! ":)`);
+                const cookies = await page.cookies();
 
-    async function checkUrlChange() {
-      if (page.url() !== url && !isLaunchingBrowser) {
-        isLaunchingBrowser = true;
-        console.log(`Worker ${process.pid} has passed queue! ":)`);
-        const cookies = await page.cookies();
+                const newBrowser = await puppeteer.launch({
+                    headless: false,  // open a visible browser
+                    args: ['--no-sandbox', '--disable-setuid-sandbox']
+                });
+                const newPage = await newBrowser.newPage();
+                await newPage.setCookie(...cookies);
+                await newPage.goto(url);
 
-        const newBrowser = await puppeteer.launch({
-          headless: false,
-          args: ['--no-sandbox', '--disable-setuid-sandbox']
-        });
+                // Stop blocking images for the new page
+                await newPage.setRequestInterception(false);
 
-        const newPage = await newBrowser.newPage();
-        await newPage.setCookie(...cookies);
-        await newPage.goto(url);
+                // Close the original page to free up resources
+                clearTimeout(checkUrlChangeTimeout);
+                await page.close();
+                pageClosed = true; // Mark the page as closed
+            }
 
-        // Stop blocking images
-        newPage.off('request');
-        await newPage.setRequestInterception(false);
-
-        await browser.close();
-        browser = newBrowser;
-        page = newPage;
-      }
-
-      // Schedule the next URL check after 10 seconds
-      setTimeout(checkUrlChange, 10000);
+            if (!pageClosed) { // Only schedule a new check if the page isn't closed
+                clearTimeout(checkUrlChangeTimeout);
+                checkUrlChangeTimeout = setTimeout(checkUrlChange, 10000);
+            }
+        } catch (error) {
+            console.error(`Worker ${process.pid} encountered an error in checkUrlChange:`, error);
+        }
     }
 
-    // Start the URL change checking loop
-    checkUrlChange();
+      // Start the URL change checking loop
+      checkUrlChange();
+    } catch (error) {
+      console.error(`Worker ${process.pid} encountered an error:`, error);
+    }
+
+    console.log(`Worker ${process.pid} started browsing`);
   }
-
-  // Launch the browser and start checking for URL changes
-  launchBrowser();
-
-  console.log(`Worker ${process.pid} started browsing`);
 }
